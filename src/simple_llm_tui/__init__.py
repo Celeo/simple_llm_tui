@@ -3,6 +3,7 @@ import asyncio
 import httpx
 from pydantic import BaseModel
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.prompt import Prompt
 
 URL = "http://localhost:11434/v1/chat/completions"
@@ -55,25 +56,38 @@ def wrap_user(content: str) -> ChatMessage:
     return ChatMessage(role="user", content=content)
 
 
-def wrap_input(previous: list, next: ChatMessage) -> ChatRequest:
-    return ChatRequest(model=MODEL, messages=[*previous, next])
+def wrap_request(messages: list[ChatMessage]) -> ChatRequest:
+    return ChatRequest(model=MODEL, messages=messages)
+
+
+def extract_output(response: ChatResponse) -> ChatMessage:
+    return response.choices[0].message
+
+
+def print_response(console: Console, response: ChatMessage) -> None:
+    print()
+    console.print(Markdown(response.content))
+    print("\n")
 
 
 async def main() -> None:
     console = Console()
-    messages = []
+    history: list[ChatMessage] = []
     while True:
         message = Prompt.ask("[green]Input[/green]")
         if not message:
             console.print("\n[cyan]Bye! :wave:[/cyan]")
             break
-        input = wrap_user(message)  # messages)
-        input = wrap_input([], input)
-        console.print_json(input.model_dump_json())
-        response = await call_llm(input)
-        console.print_json(response.model_dump_json())
-        messages.append(input)
-        # messages.extend([input, *response.choices])
+
+        next = wrap_user(message)
+        history.append(next)
+        request = wrap_request(history)
+
+        response = await call_llm(request)
+        response = extract_output(response)
+        print_response(console, response)
+
+        history.append(response)
 
 
 if __name__ == "__main__":
