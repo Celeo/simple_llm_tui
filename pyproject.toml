@@ -1,0 +1,21 @@
+[project]
+name = "simple-llm-tui"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Celeo", email = "mattboulanger@fastmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "pydantic>=2.13.5",
+    "rich>=15.0.0",
+]
+
+[project.scripts]
+simple-llm-tui = "simple_llm_tui:main"
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"
