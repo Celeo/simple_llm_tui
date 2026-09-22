@@ -1,4 +1,5 @@
 import asyncio
+import sys
 
 import httpx
 from pydantic import BaseModel
@@ -42,14 +43,20 @@ class ChatResponse(BaseModel):
     usage: Usage
 
 
-async def call_llm(input: ChatRequest) -> ChatResponse:
-    async with httpx.AsyncClient() as client:
-        response = await client.post(URL, json=input.model_dump())
+async def call_llm(
+    client: httpx.AsyncClient, console: Console, request: ChatRequest
+) -> ChatResponse | None:
+    try:
+        response = await client.post(URL, json=request.model_dump())
         if response.status_code != 200:
-            raise ValueError(
-                f"Error response code {response.status_code} from Ollama: {response.text}"
+            console.print(
+                f"[red]Something went wrong with the request: {response.text} ({response.status_code})[/red]"
             )
+            return None
         return ChatResponse.model_validate(response.json())
+    except httpx.HTTPError:
+        console.print("[red]Ollama could not be reached - is it running?[/red]")
+        return None
 
 
 def wrap_user(content: str) -> ChatMessage:
@@ -72,22 +79,26 @@ def print_response(console: Console, response: ChatMessage) -> None:
 
 async def main() -> None:
     console = Console()
-    history: list[ChatMessage] = []
-    while True:
-        message = Prompt.ask("[green]Input[/green]")
-        if not message:
-            console.print("\n[cyan]Bye! :wave:[/cyan]")
-            break
+    history: list[ChatMessage] = [
+        ChatMessage(role="system", content="You are a simple assistant.")
+    ]
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        while True:
+            message = Prompt.ask("[green]Input[/green]")
+            if not message:
+                console.print("\n[cyan]Bye! :wave:[/cyan]")
+                break
 
-        next = wrap_user(message)
-        history.append(next)
-        request = wrap_request(history)
+            user_message = wrap_user(message)
+            history.append(user_message)
+            request = wrap_request(history)
 
-        response = await call_llm(request)
-        response = extract_output(response)
-        print_response(console, response)
-
-        history.append(response)
+            response = await call_llm(client, console, request)
+            if not response:
+                sys.exit(1)
+            response = extract_output(response)
+            print_response(console, response)
+            history.append(response)
 
 
 if __name__ == "__main__":
