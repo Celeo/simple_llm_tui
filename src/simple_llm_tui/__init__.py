@@ -5,7 +5,7 @@ import sys
 from typing import Any
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from pydantic.fields import Field
 from rich.console import Console
 from rich.markdown import Markdown
@@ -13,13 +13,31 @@ from rich.prompt import Prompt
 
 URL = "http://localhost:11434/v1/chat/completions"
 MODEL = "qwen3:8b"
+LOOP_TOOL_CALL_MAX = 5
 
 
-class ChatMessage(BaseModel):
+class ApiModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ToolCallFunction(ApiModel):
+    name: str
+    arguments: str
+
+
+class ToolCall(ApiModel):
+    id: str
+    index: int
+    kind: str = Field(default="function", alias="type")
+    function: ToolCallFunction
+
+
+class ChatMessage(ApiModel):
     role: str
     content: str
+    reasoning: str | None = Field(default=None)
     tool_call_id: str | None = Field(default=None)
-    tool_calls: list[Any] | None = Field(default=None)
+    tool_calls: list[ToolCall] | None = Field(default=None)
 
 
 class ToolDefinition(BaseModel):
@@ -39,60 +57,24 @@ class ChatRequest(BaseModel):
     tools: list[Tool]
 
 
-class ChatMessageWrapper(BaseModel):
+class ChatMessageWrapper(ApiModel):
     index: int
     message: ChatMessage
     finish_reason: str
 
 
-class Usage(BaseModel):
+class PromptTokensDetails(ApiModel):
+    cached_tokens: int
+
+
+class Usage(ApiModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    prompt_tokens_details: PromptTokensDetails | None = Field(default=None)
 
 
-"""
-{
-  "id": "chatcmpl-29",
-  "object": "chat.completion",
-  "created": 1790137871,
-  "model": "qwen3:8b",
-  "system_fingerprint": "fp_ollama",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "",
-        "reasoning": "Okay, the user is asking about the type of FOSS license used in the ./LICENSE file. First, I need to figure out how to determine the license type. The most straightforward way is to check the contents of the LICENSE file. Since the user mentioned the file is in the current directory, the path is ./LICENSE.\n\nI remember that there's a function called read_file that can read the contents of a file from the local filesystem. The function requires the path as an argument. So, I should use that function to read the LICENSE file. Once I have the content, I can analyze it to identify the license type. Common FOSS licenses include MIT, Apache, GPL, etc. Each has a distinctive wording and preamble. For example, the MIT license starts with \"MIT License\" and has a specific copyright notice. The Apache license has a more detailed section about permissions and conditions. The GPL license includes terms about free distribution and source code. So, after reading the file, I can look for these key phrases to determine which license it is. If the file contains multiple licenses, I might need to check each section. But the user is asking for the type used, so it's likely a single license. Therefore, the plan is to read the file and then analyze its content to identify the license type.\n",
-        "tool_calls": [
-          {
-            "id": "call_58hoea1l",
-            "index": 0,
-            "type": "function",
-            "function": {
-              "name": "read_file",
-              "arguments": "{\"path\":\"./LICENSE\"}"
-            }
-          }
-        ]
-      },
-      "finish_reason": "tool_calls"
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 169,
-    "prompt_tokens_details": {
-      "cached_tokens": 147
-    },
-    "completion_tokens": 290,
-    "total_tokens": 459
-  }
-}
-"""
-
-
-class ChatResponse(BaseModel):
+class ChatResponse(ApiModel):
     id: str
     object: str
     created: int
@@ -162,27 +144,35 @@ def print_response(console: Console, response: ChatMessage) -> None:
     print("\n")
 
 
-def call_tools(console: Console, response: ChatMessage) -> list[ChatMessage]:
+def call_tools(response: ChatMessage) -> list[ChatMessage]:
     ret = []
 
     for entry in response.tool_calls or []:
-        id = entry["id"]
-        tool = entry["function"]["name"]
-        args = json.loads(entry["function"]["arguments"])
+        id = entry.id
+        tool = entry.function.name
+        args = json.loads(entry.function.arguments)
 
         match tool:
             case "read_file":
-                with open(args["path"]) as f:
-                    content = f.read()
+                try:
+                    with open(args["path"]) as f:
+                        content = f.read()
+                except OSError as e:
+                    content = f"Error in 'read_file' tool: {e}"
                 ret.append(ChatMessage(role="tool", tool_call_id=id, content=content))
             case _:
-                console.print(f"[red]Unknown tool '{tool}' called[/red]")
-                sys.exit(1)
+                ret.append(
+                    ChatMessage(
+                        role="tool",
+                        tool_call_id=id,
+                        content=f"Unknown tool '{tool}'",
+                    )
+                )
 
     return ret
 
 
-async def main() -> None:
+async def async_main() -> None:
     parser = argparse.ArgumentParser(description="Simple LLM TUI")
     parser.add_argument(
         "-d", "--debug", action="store_true", help="Enable debug logging"
@@ -195,6 +185,7 @@ async def main() -> None:
     ]
     async with httpx.AsyncClient(timeout=60.0) as client:
         while True:
+            tool_calls = 0
             message = Prompt.ask("[green]Input[/green]")
             if not message:
                 console.print("\n[cyan]Bye! :wave:[/cyan]")
@@ -212,9 +203,10 @@ async def main() -> None:
 
             response = extract_output(response)
             history.append(response)
-            while response.tool_calls:
-                tools_output = call_tools(console, response)
+            while response.tool_calls and tool_calls < LOOP_TOOL_CALL_MAX:
+                tools_output = call_tools(response)
                 history.extend(tools_output)
+                tool_calls += 1
                 request = wrap_request(history)
                 if args.debug:
                     console.print_json(request.model_dump_json(by_alias=True))
@@ -228,5 +220,9 @@ async def main() -> None:
             print_response(console, response)
 
 
+def main() -> None:
+    asyncio.run(async_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
