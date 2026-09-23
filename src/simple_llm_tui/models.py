@@ -41,6 +41,7 @@ class Tool(BaseModel):
 
 class ChatRequest(BaseModel):
     model: str
+    reasoning_effort: str | None = Field(default=None)
     messages: list[ChatMessage]
     tools: list[Tool]
 

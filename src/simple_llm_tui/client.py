@@ -14,10 +14,12 @@ from .models import (
     Tool,
     ToolDefinition,
 )
+from .tools import list_directory, read_file
 
 HEALTH_URL = "http://localhost:11434/api/tags"
 REQUEST_URL = "http://localhost:11434/v1/chat/completions"
 MODEL = "qwen3:8b"
+SYSTEM_PROMPT = "You are a simple assistant. /think is a control token, not part of the user's question."
 LOOP_TOOL_CALL_MAX = 5
 TOOLS = [
     Tool(
@@ -35,7 +37,23 @@ TOOLS = [
                 "required": ["path"],
             },
         )
-    )
+    ),
+    Tool(
+        function=ToolDefinition(
+            name="list_directory",
+            description="List files in a directory. Does not recurse down directories.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Absolute or relative path to the directory to list files in.",
+                    }
+                },
+                "required": ["path"],
+            },
+        )
+    ),
 ]
 
 
@@ -53,6 +71,7 @@ async def call_llm(
             return None
         data = response.json()
         if debug:
+            console.print("[cyan]>> Response[/cyan]")
             console.print_json(json.dumps(data, indent=2))
         return ChatResponse.model_validate(data)
     except httpx.HTTPError:
@@ -64,8 +83,13 @@ def wrap_user(content: str) -> ChatMessage:
     return ChatMessage(role="user", content=content)
 
 
-def wrap_request(messages: list[ChatMessage]) -> ChatRequest:
-    return ChatRequest(model=MODEL, messages=messages, tools=TOOLS)
+def wrap_request(think: bool, messages: list[ChatMessage]) -> ChatRequest:
+    return ChatRequest(
+        model=MODEL,
+        messages=messages,
+        tools=TOOLS,
+        reasoning_effort=None if think else "none",
+    )
 
 
 def extract_output(response: ChatResponse) -> ChatMessage:
@@ -88,12 +112,9 @@ def call_tools(response: ChatMessage) -> list[ChatMessage]:
 
         match tool:
             case "read_file":
-                try:
-                    with open(args["path"]) as f:
-                        content = f.read()
-                except OSError as e:
-                    content = f"Error in 'read_file' tool: {e}"
-                ret.append(ChatMessage(role="tool", tool_call_id=id, content=content))
+                ret.append(read_file(id, args))
+            case "list_directory":
+                ret.append(list_directory(id, args))
             case _:
                 ret.append(
                     ChatMessage(
@@ -118,16 +139,34 @@ async def check_ready(console: Console, client: httpx.AsyncClient) -> bool:
         return False
 
 
+def maybe_dump_history(do: bool, history: list[ChatMessage]) -> None:
+    if do:
+        with open("history.jsonl", "w") as f:
+            f.writelines(
+                [
+                    f"{entry.model_dump_json(by_alias=True, exclude_none=True)}\n"
+                    for entry in history
+                ]
+            )
+
+
 async def async_main() -> None:
     parser = argparse.ArgumentParser(description="Simple LLM TUI")
     parser.add_argument(
         "-d", "--debug", action="store_true", help="Enable debug logging"
     )
+    parser.add_argument(
+        "-l", "--log-to-file", action="store_true", help="Log to a file"
+    )
+    parser.add_argument(
+        "-t",
+        "--think",
+        action="store_true",
+        help="Enable thinking (disabled by default)",
+    )
     args = parser.parse_args()
     console = Console()
-    history: list[ChatMessage] = [
-        ChatMessage(role="system", content="You are a simple assistant.")
-    ]
+    history = [ChatMessage(role="system", content=SYSTEM_PROMPT)]
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         if not await check_ready(console, client):
@@ -138,16 +177,21 @@ async def async_main() -> None:
             message = Prompt.ask("[green]Input[/green]")
             if not message:
                 console.print("\n[cyan]Bye! :wave:[/cyan]")
+                maybe_dump_history(args.log_to_file, history)
                 break
 
             user_message = wrap_user(message)
             history.append(user_message)
-            request = wrap_request(history)
+            request = wrap_request(args.think, history)
             if args.debug:
-                console.print_json(request.model_dump_json(by_alias=True))
+                console.print("[cyan]>> Request[/cyan]")
+                console.print_json(
+                    request.model_dump_json(by_alias=True, exclude_none=True)
+                )
 
             response = await call_llm(client, console, args.debug, request)
             if not response:
+                maybe_dump_history(args.log_to_file, history)
                 sys.exit(1)
 
             response = extract_output(response)
@@ -156,12 +200,16 @@ async def async_main() -> None:
                 tools_output = call_tools(response)
                 history.extend(tools_output)
                 tool_calls += 1
-                request = wrap_request(history)
+                request = wrap_request(args.think, history)
                 if args.debug:
-                    console.print_json(request.model_dump_json(by_alias=True))
+                    console.print("[cyan]>> Tool response[/cyan]")
+                    console.print_json(
+                        request.model_dump_json(by_alias=True, exclude_none=True)
+                    )
 
                 response = await call_llm(client, console, args.debug, request)
                 if not response:
+                    maybe_dump_history(args.log_to_file, history)
                     sys.exit(1)
                 response = extract_output(response)
                 history.append(response)
