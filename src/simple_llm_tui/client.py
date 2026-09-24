@@ -11,50 +11,14 @@ from .models import (
     ChatMessage,
     ChatRequest,
     ChatResponse,
-    Tool,
-    ToolDefinition,
 )
-from .tools import list_directory, read_file
+from .tools import TOOL_DEFINITIONS, list_directory, read_file
 
 HEALTH_URL = "http://localhost:11434/api/tags"
 REQUEST_URL = "http://localhost:11434/v1/chat/completions"
 MODEL = "qwen3:8b"
-SYSTEM_PROMPT = "You are a simple assistant. /think is a control token, not part of the user's question."
+SYSTEM_PROMPT = "You are a simple assistant. `/think` is a control token, not part of the user's question."
 LOOP_TOOL_CALL_MAX = 5
-TOOLS = [
-    Tool(
-        function=ToolDefinition(
-            name="read_file",
-            description="Read the contents of a file from the local filesystem.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute or relative path to the file to read.",
-                    }
-                },
-                "required": ["path"],
-            },
-        )
-    ),
-    Tool(
-        function=ToolDefinition(
-            name="list_directory",
-            description="List files in a directory. Does not recurse down directories.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute or relative path to the directory to list files in.",
-                    }
-                },
-                "required": ["path"],
-            },
-        )
-    ),
-]
 
 
 async def call_llm(
@@ -87,7 +51,7 @@ def wrap_request(think: bool, messages: list[ChatMessage]) -> ChatRequest:
     return ChatRequest(
         model=MODEL,
         messages=messages,
-        tools=TOOLS,
+        tools=TOOL_DEFINITIONS,
         reasoning_effort=None if think else "none",
     )
 
